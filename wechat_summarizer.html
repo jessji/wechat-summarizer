@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WeChat Summarizer · Clean</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.5/dist/tesseract.min.js"></script>
+  <style> body { font-family: ui-sans-serif, system-ui; } </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+  <div class="max-w-6xl mx-auto p-6">
+    <header class="mb-4 flex items-center justify-between">
+      <h1 class="text-2xl font-bold">WeChat Chat Summarizer</h1>
+      <span id="status" class="text-xs text-slate-500"></span>
+    </header>
+
+    <section class="grid md:grid-cols-2 gap-6">
+      <!-- LEFT: inputs -->
+      <div class="space-y-4">
+        <div class="rounded-2xl bg-white border p-4 space-y-3">
+          <div class="grid md:grid-cols-2 gap-2">
+            <input id="apiKey" type="password" placeholder="API Key (OpenRouter: sk-or-...)" class="border rounded px-3 py-2 w-full" />
+            <input id="baseUrl" type="text" value="https://openrouter.ai/api/v1" class="border rounded px-3 py-2 w-full" />
+            <input id="model" type="text" value="openai/gpt-4o-mini" class="border rounded px-3 py-2 w-full" />
+            <div class="flex gap-2 flex-wrap text-xs">
+              <button class="px-2 py-1 border rounded" onclick="quick('openrouter')">OpenRouter</button>
+              <button class="px-2 py-1 border rounded" onclick="quick('openai')">OpenAI</button>
+              <button class="px-2 py-1 border rounded" onclick="quick('groq')">Groq</button>
+              <button class="px-2 py-1 border rounded" onclick="quick('lmstudio')">本地 LM Studio</button>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500">提示：如果本地以 <code>file://</code> 打开，部分浏览器可能限制跨域。建议用 <code>python3 -m http.server 8000</code> 或 VSCode Live Server 启动后访问。</p>
+        </div>
+
+        <div class="rounded-2xl bg-white border p-4 space-y-3">
+          <div class="flex gap-2">
+            <input id="fileInput" type="file" multiple accept=".txt,.zip,.png,.jpg,.jpeg,.webp" class="border rounded px-3 py-2 w-full" />
+            <button id="btnImport" class="px-3 py-2 rounded bg-slate-200">导入文件</button>
+          </div>
+          <textarea id="raw" rows="14" placeholder="粘贴聊天记录或导入文件（支持截图OCR）..." class="border rounded px-3 py-2 w-full"></textarea>
+          <div class="flex gap-2">
+            <button id="btnSummarize" class="px-4 py-2 rounded bg-black text-white">生成总结</button>
+            <button id="btnCopy" class="px-4 py-2 rounded bg-slate-200">复制结果</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT: output -->
+      <div class="rounded-2xl bg-white border p-4">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="font-semibold">结果</h2>
+          <span id="spinner" class="text-xs text-slate-400 hidden">正在生成…</span>
+        </div>
+        <pre id="out" class="whitespace-pre-wrap text-sm leading-6"></pre>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const $ = (id)=>document.getElementById(id);
+
+    function setStatus(){
+      const base = $('baseUrl').value.trim();
+      const model = $('model').value.trim();
+      $('status').textContent = `Provider: ${base} · Model: ${model}`;
+    }
+
+    function quick(which){
+      if(which==='openrouter'){
+        $('baseUrl').value = 'https://openrouter.ai/api/v1';
+        $('model').value = 'openai/gpt-4o-mini';
+      }else if(which==='openai'){
+        $('baseUrl').value = 'https://api.openai.com/v1';
+        $('model').value = 'gpt-4o-mini';
+      }else if(which==='groq'){
+        $('baseUrl').value = 'https://api.groq.com/openai/v1';
+        $('model').value = 'llama-3.1-70b-versatile';
+      }else if(which==='lmstudio'){
+        $('baseUrl').value = 'http://localhost:1234/v1';
+        $('model').value = 'lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF';
+      }
+      setStatus();
+    }
+
+    async function importFiles(){
+      const files = $('fileInput').files; if(!files.length){ alert('请选择文件'); return; }
+      $('out').textContent = '⏳ 正在解析文件...';
+      let all='';
+      for(const f of files){
+        const ext=(f.name.split('.').pop()||'').toLowerCase();
+        try{
+          if(ext==='txt') all += '\n' + await f.text();
+          else if(ext==='zip'){
+            const zip = await JSZip.loadAsync(f);
+            for(const name of Object.keys(zip.files)) if(/\.txt$/i.test(name)) all+='\n'+await zip.files[name].async('string');
+          }else if(['png','jpg','jpeg','webp'].includes(ext)){
+            const url = URL.createObjectURL(f);
+            const { data:{ text } } = await Tesseract.recognize(url, 'chi_sim+eng');
+            URL.revokeObjectURL(url);
+            all += '\n' + text;
+          }
+        }catch(e){ console.error(e); }
+      }
+      $('raw').value = (all||'').trim();
+      $('out').textContent = all ? `✔ 已导入 ${all.length} 字符` : '未识别到文本';
+    }
+
+    async function summarize(){
+      const key = $('apiKey').value.trim();
+      const base = $('baseUrl').value.trim().replace(/\/$/,'');
+      const model = $('model').value.trim();
+      let content = $('raw').value.trim();
+      if(!key){ $('out').textContent='❗请填写 API Key'; return; }
+      if(!content){ $('out').textContent='❗请先粘贴或上传内容'; return; }
+      if(content.length>120000) content = content.slice(0,120000)+'\n…(已截断)';
+
+      const headers={ 'Content-Type':'application/json', 'Authorization':`Bearer ${key}` };
+      if(base.includes('openrouter.ai')){ headers['HTTP-Referer']='http://localhost'; headers['X-Title']='WeChat Summarizer'; }
+
+      const prompt = `你是资深社群秘书。请总结以下微信群聊天记录中的：\n1) 主要讨论点（Top3-5）\n2) 关键结论与待办（含负责人/截止时间/下一步建议）\n3) 待确认/开放问题\n4) 重要链接或数据\n5) 群聊氛围一句话\n\n以 Markdown 输出，条理清晰，避免虚构。\n\n--- 原始聊天 ---\n${content}`;
+
+      $('spinner').classList.remove('hidden');
+      $('out').textContent='⏳ 正在生成总结...';
+      try{
+        const resp = await fetch(`${base}/chat/completions`,{
+          method:'POST', headers,
+          body: JSON.stringify({ model, messages:[{role:'user', content: prompt}], temperature:0.2 })
+        });
+        const textBody = await resp.text();
+        let out='';
+        try{
+          const data = JSON.parse(textBody);
+          out = resp.ok ? (data.choices?.[0]?.message?.content?.trim() || '（API返回为空）')
+                        : ('❌ API错误：' + (data.error?.message || resp.status+' '+resp.statusText));
+        }catch{ out = '❌ 无法解析响应：' + textBody.slice(0,400); }
+        $('out').textContent = out;
+      }catch(e){
+        $('out').textContent = '❌ 网络/浏览器错误：' + e.message;
+      }finally{
+        $('spinner').classList.add('hidden');
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded',()=>{
+      setStatus();
+      $('btnImport').onclick = importFiles;
+      $('btnSummarize').onclick = summarize;
+      $('btnCopy').onclick = async ()=>{ const t=$('out').textContent; if(!t) return; await navigator.clipboard.writeText(t); alert('已复制'); };
+      $('baseUrl').addEventListener('input', setStatus);
+      $('model').addEventListener('input', setStatus);
+    });
+  </script>
+</body>
+</html>
